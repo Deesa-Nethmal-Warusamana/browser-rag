@@ -1,10 +1,17 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RagClient } from '../lib/ragClient';
 import { buildPrompt, MIN_RELEVANT_SCORE } from '../lib/prompts';
 import { createOutputGuard, stopMessage, type StopReason } from '../lib/repeatGuard';
 import type { SearchHit, SearchResult } from '../lib/types';
 import { streamCompletion } from '../llm/openai';
-import { interruptLocal, isModelLoaded, loadLocalModel, streamLocal } from '../llm/webllm';
+import {
+  getBuiltInStatus,
+  isMissingModelReply,
+  isQuotaError,
+  prepareBuiltIn,
+  streamBuiltIn,
+  type BuiltInStatus,
+} from '../llm/builtinAI';
 import type { Settings } from './useSettings';
 
 export interface ChatItem {
@@ -20,10 +27,11 @@ export interface ChatItem {
   meta?: string;
 }
 
-export interface LocalModelState {
-  status: 'idle' | 'loading' | 'ready' | 'error';
-  text: string;
+export interface BuiltInState {
+  status: BuiltInStatus | 'checking';
+  /** Download progress, 0-1, when Chrome is fetching the model. */
   pct?: number;
+  detail?: string;
 }
 
 const uid = () =>
@@ -33,42 +41,60 @@ const uid = () =>
 
 function describeRetrieval(result: SearchResult): string {
   const best = Math.round(result.topDenseScore * 100);
-  const approach = result.approach === 'overview' ? ' · overview ranking (front matter boosted)' : '';
+  const approach =
+    result.approach === 'overview' ? ' · overview ranking (front matter boosted)' : '';
   return `${result.hits.length} passages · ${result.vectorCount} chunks searched · ${result.tookMs} ms · best match ${best}%${approach}`;
+}
+
+function builtInUnavailableMessage(status: BuiltInStatus): string {
+  if (status === 'downloadable' || status === 'downloading') {
+    return 'Chrome has not finished preparing its built-in model. Open Setup → Built-in, click “Enable built-in model”, then ask again.';
+  }
+  if (status === 'unsupported') {
+    return "This browser doesn't expose the built-in AI API. Use Chrome 138+ on desktop, or switch to the API provider in Setup.";
+  }
+  return 'The built-in model is unavailable on this device. Switch to the API provider in Setup, or free up disk space and retry.';
 }
 
 export function useChat(client: RagClient, settings: Settings) {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
-  const [local, setLocal] = useState<LocalModelState>({ status: 'idle', text: '' });
+  const [builtin, setBuiltin] = useState<BuiltInState>({ status: 'checking' });
   const abortRef = useRef<AbortController | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
-  const ensureLocalModel = useCallback(async () => {
-    const modelId = settingsRef.current.localModel;
-    if (isModelLoaded(modelId)) return loadLocalModel(modelId, () => {});
-    setLocal({ status: 'loading', text: 'Starting model download…', pct: 0 });
+  const refreshBuiltIn = useCallback(async () => {
+    setBuiltin((current) => (current.status === 'checking' ? current : { status: 'checking' }));
     try {
-      const engine = await loadLocalModel(modelId, (text, pct) =>
-        setLocal({ status: 'loading', text, pct }),
-      );
-      setLocal({ status: 'ready', text: 'Local model ready' });
-      return engine;
+      const status = await getBuiltInStatus();
+      setBuiltin({ status });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setLocal({ status: 'error', text: message });
-      throw error;
+      setBuiltin({
+        status: 'unavailable',
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
   }, []);
 
-  const preloadLocalModel = useCallback(async () => {
+  useEffect(() => {
+    void refreshBuiltIn();
+  }, [refreshBuiltIn]);
+
+  /** Ask Chrome to download the model now rather than on the first question. */
+  const enableBuiltIn = useCallback(async () => {
+    setBuiltin({ status: 'downloading', pct: 0 });
     try {
-      await ensureLocalModel();
-    } catch {
-      /* surfaced through local state */
+      await prepareBuiltIn((pct) => setBuiltin({ status: 'downloading', pct }));
+      const status = await getBuiltInStatus();
+      setBuiltin({ status });
+    } catch (error) {
+      setBuiltin({
+        status: 'unavailable',
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
-  }, [ensureLocalModel]);
+  }, []);
 
   const patch = useCallback((id: string, update: Partial<ChatItem>) => {
     setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...update } : item)));
@@ -157,7 +183,9 @@ export function useChat(client: RagClient, settings: Settings) {
 
         if (active.provider === 'api') {
           if (!active.apiKey.trim()) {
-            throw new Error('Add an API key in Settings, or switch the provider back to the local model.');
+            throw new Error(
+              'Add an API key in Setup, or switch the provider back to the built-in model.',
+            );
           }
           stopReason = await consume(
             streamCompletion(
@@ -169,9 +197,33 @@ export function useChat(client: RagClient, settings: Settings) {
           // Nothing will read the rest of the body, so release the connection.
           if (stopReason) controller.abort();
         } else {
-          const engine = await ensureLocalModel();
-          stopReason = await consume(streamLocal(engine, messages, controller.signal));
-          if (stopReason) await interruptLocal(engine);
+          const status = await getBuiltInStatus();
+          if (status !== 'available') throw new Error(builtInUnavailableMessage(status));
+
+          // Gemini Nano's context window is small: if the prompt is rejected,
+          // drop the weakest passages and try again before giving up.
+          let hits = result.hits;
+          for (let attempt = 0; ; attempt++) {
+            try {
+              stopReason = await consume(
+                streamBuiltIn(buildPrompt(question, hits, lowConfidence), {
+                  signal: controller.signal,
+                  onProgress: (pct) => setBuiltin({ status: 'downloading', pct }),
+                }),
+              );
+              break;
+            } catch (error) {
+              if (!isQuotaError(error) || hits.length <= 2 || attempt >= 2) throw error;
+              hits = hits.slice(0, Math.max(2, Math.ceil(hits.length / 2)));
+              patch(assistantId, { content: '', citations: hits });
+            }
+          }
+
+          if (isMissingModelReply(guard.text)) {
+            throw new Error(
+              'This browser exposes the built-in AI API but ships no model — common in Electron and embedded webview builds. Open the app in Chrome 138+ on desktop, or switch to the API provider in Setup.',
+            );
+          }
         }
 
         if (stopReason) {
@@ -197,15 +249,13 @@ export function useChat(client: RagClient, settings: Settings) {
         });
       } finally {
         setItems((prev) =>
-          prev.map((item) =>
-            item.id === assistantId ? { ...item, pending: false } : item,
-          ),
+          prev.map((item) => (item.id === assistantId ? { ...item, pending: false } : item)),
         );
         abortRef.current = null;
         setBusy(false);
       }
     },
-    [busy, client, ensureLocalModel, patch],
+    [busy, client, patch],
   );
 
   const stop = useCallback(() => {
@@ -219,9 +269,5 @@ export function useChat(client: RagClient, settings: Settings) {
     setBusy(false);
   }, []);
 
-  const dismissLocalError = useCallback(() => {
-    setLocal({ status: 'idle', text: '' });
-  }, []);
-
-  return { items, busy, local, send, stop, clear, preloadLocalModel, dismissLocalError, patch };
+  return { items, busy, builtin, send, stop, clear, refreshBuiltIn, enableBuiltIn };
 }

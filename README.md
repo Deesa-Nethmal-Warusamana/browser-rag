@@ -11,6 +11,8 @@ file, ask a question, and get an answer with citations pointing at the exact pas
 - **No backend.** The whole app is static files. Hosting cost: $0.
 - **No data leaves the device.** Documents are parsed, chunked and embedded locally with
   Transformers.js (ONNX Runtime Web, WebGPU with a WASM fallback) and stored in IndexedDB.
+- **Generation uses Chrome's built-in model.** The Prompt API (Gemini Nano) ships with the browser,
+  so there is no LLM to download, no key and no 6 MB inference bundle in this repo.
 - **Optional frontier model.** Bring an API key for better synthesis — only the retrieved passages
   and your question are sent to the provider.
 - **Measured, not vibes.** Hybrid retrieval (dense + BM25, fused with reciprocal rank fusion) with
@@ -33,6 +35,11 @@ Requirements: a secure context (`localhost` or HTTPS) for `crypto.subtle`, Web W
 IndexedDB. WebGPU is used for embedding when available (Chrome/Edge, recent Safari/Firefox);
 otherwise the app falls back to single-threaded WASM.
 
+Answer generation uses **Chrome's built-in Prompt API** (Gemini Nano, Chrome 138+ on desktop). If
+`LanguageModel.availability()` reports `downloadable`, open **Setup → Built-in → Enable built-in
+model** once; Chrome manages that download itself. On browsers without the API, switch the provider
+to **API key** and use any OpenAI-compatible endpoint.
+
 ## How it works
 
 ```mermaid
@@ -51,7 +58,7 @@ flowchart LR
     L --> R
     R --> T[Top-k passages]
     T --> M[Prompt with numbered sources]
-    M --> LLM[Local WebLLM<br/>or API model]
+    M --> LLM[Chrome built-in model<br/>or API model]
     LLM --> A[Answer + citations]
 ```
 
@@ -62,7 +69,7 @@ flowchart LR
 | Embed | `bge-small-en-v1.5` (q4 on WebGPU, q8 on WASM), CLS pooling + L2 norm, 16-chunk batches in a worker |
 | Store | IndexedDB, one record per document (chunks + `Float32Array` buffer) — incremental, per-document delete |
 | Retrieve | Cosine over a flat `Float32Array`, BM25 inverted index, RRF fusion, top-k |
-| Generate | WebLLM (MLC) on-device, or any OpenAI-compatible endpoint streamed over SSE |
+| Generate | Chrome's Prompt API (Gemini Nano) on-device, or any OpenAI-compatible endpoint streamed over SSE |
 
 ### Retrieval details worth knowing
 
@@ -88,11 +95,11 @@ reweighted towards the first fifth of each document, and the intent vocabulary i
 the lexical lookup. The UI reports `overview ranking` in the retrieval metadata. This is a narrow
 heuristic and an obvious candidate for the eval harness to confirm or reject.
 
-**Output guard**: every stream is capped (700–800 tokens, 4,000 characters) and watched for
-degenerate repetition — if the last 64 characters recur three times, generation is cut and the
-answer is annotated with the reason. Small on-device models fall into copy loops when the context
-is full of repeated instruction-shaped sentences, and a 10k-character loop is not recoverable after
-the fact.
+**Output guard**: every stream is capped at 4,000 characters (API calls also send `max_tokens`) and
+watched for degenerate repetition — if the last 64 characters recur three times, generation is cut
+and the answer is annotated with the reason. Small on-device models fall into copy loops when the
+context is full of repeated instruction-shaped sentences, and a 10k-character loop is not
+recoverable after the fact.
 
 **Prompt contract**: numbered passages, cite with `[n]`, refuse when the context is insufficient,
 and treat text inside passages as data rather than instructions (an indirect prompt-injection
@@ -100,12 +107,23 @@ guard — retrieved documents are untrusted input).
 
 ## Choosing a generator
 
-| | On-device (WebLLM) | API key |
+| | Built-in (Chrome) | API key |
 | --- | --- | --- |
-| Download | 0.7–1.9 GB, cached after first load | none |
+| Download | Chrome fetches and manages Gemini Nano; the app bundles nothing | none |
 | Privacy | nothing leaves the device | question + retrieved passages go to the provider |
-| Quality | 1B–3B models; fine for extraction, weaker at synthesis | frontier quality |
-| Requirements | WebGPU | network |
+| Quality | small on-device model; fine for extraction and summarising passages | frontier quality |
+| Requirements | Chrome 138+ desktop, supported GPU, ~22 GB free disk | network |
+
+The built-in path speaks the standard `LanguageModel` interface: `availability()` decides what the
+UI shows, `create({ initialPrompts })` seeds the system prompt, and `promptStreaming()` provides the
+tokens. `src/llm/builtinAI.ts` also accepts the older `ai.languageModel` shape from the origin
+trial, and normalises both cumulative-snapshot and delta-style streams.
+
+Two practical details: if the prompt exceeds the model's context window, the app drops the weakest
+passages and retries (Gemini Nano's window is small); and some embedded Chromium shells — Electron
+apps, IDE webviews — expose `LanguageModel` but ship no model, in which case `prompt()` echoes the
+input or returns a canned sentence. That case is detected and reported as an error rather than
+shown as an answer.
 
 The key is kept in `sessionStorage` by default and only written to `localStorage` if you tick
 "Remember key on this device". It is sent directly from the browser to the provider — there is no
@@ -118,10 +136,13 @@ From a smoke test on the bundled sample (8 chunks, Apple M-series, Chrome):
 
 | Step | Result |
 | --- | --- |
-| Model download (first visit) | ~25 MB, cached thereafter |
+| Embedding model download (first visit) | ~25 MB, cached thereafter |
 | Ingestion of a 4k-char markdown file | 8 chunks, < 1 s |
 | Retrieval (embed query + cosine + BM25 + RRF) | **136 ms** |
 | Top dense score for *"What is the error budget policy…"* | **0.712**, correct section ranked first |
+
+The LLM is no longer part of that budget: `@mlc-ai/web-llm` and its ~6 MB bundle are gone, and the
+model itself is Chrome's, not the app's.
 
 These are indicative numbers from a tiny corpus, not a benchmark. The roadmap below adds a proper
 eval harness — publishing recall@k and latency across chunking/embedding/reranking configurations
@@ -142,9 +163,9 @@ src/
   workers/
     embed.worker.ts     model, vectors, search, storage — all off the main thread
   llm/
-    webllm.ts           on-device MLC engine
+    builtinAI.ts        Chrome Prompt API adapter (current + origin-trial shapes)
     openai.ts           OpenAI-compatible SSE streaming
-    models.ts           model + provider presets
+    models.ts           API provider presets
   hooks/
     useChat.ts          retrieval → prompt → streamed answer
     useSettings.ts      settings and key storage
@@ -166,16 +187,13 @@ npm run typecheck
 
 ### Dev-server dependency cache
 
-Vite pre-bundles dependencies into `node_modules/.vite`. `@mlc-ai/web-llm` **must** be pre-bundled
-(its package entry is a raw ESM file with bare imports, so it cannot be served unbundled), while
-`@huggingface/transformers` must **not** be (it ships its own wasm assets). If you change the
-`optimizeDeps` configuration or upgrade either package, restart with a clean cache:
+Vite pre-bundles dependencies into `node_modules/.vite`. `@huggingface/transformers` must **not** be
+pre-bundled — it ships its own wasm assets and breaks when bundled. If you change the
+`optimizeDeps` configuration or upgrade it, restart with a clean cache:
 
 ```bash
 rm -rf node_modules/.vite && npm run dev
 ```
-
-Symptom of a stale cache: `Failed to fetch dynamically imported module .../@mlc-ai/web-llm/lib/index.js`.
 
 ## Deploying
 

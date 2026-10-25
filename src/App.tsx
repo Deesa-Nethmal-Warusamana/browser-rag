@@ -4,8 +4,6 @@ import { isSupportedFile, parseFile } from './lib/parse';
 import type { DocSummary, RagStats } from './lib/types';
 import { useSettings } from './hooks/useSettings';
 import { useChat } from './hooks/useChat';
-import { hasWebGPU } from './llm/webllm';
-import { LOCAL_MODELS } from './llm/models';
 import { DocumentsPanel } from './components/DocumentsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { MessageView } from './components/MessageView';
@@ -182,7 +180,9 @@ export default function App() {
   const providerLabel =
     settings.provider === 'api'
       ? `${settings.model || 'API model'} · frontier`
-      : `${LOCAL_MODELS.find((m) => m.id === settings.localModel)?.label ?? 'On-device model'} · in-browser`;
+      : chat.builtin.status === 'available'
+        ? 'Gemini Nano · built-in'
+        : 'Built-in model · not ready';
 
   const suggestions = useMemo(() => {
     const first = docs[0]?.title;
@@ -317,12 +317,12 @@ export default function App() {
           <SettingsPanel
             settings={settings}
             update={updateSettings}
-            local={chat.local}
-            hasWebGPU={hasWebGPU()}
+            builtin={chat.builtin}
             hasDocs={docs.length > 0}
             backend={stats?.backend ?? ''}
             chunks={stats?.chunks ?? 0}
-            onLoadLocal={chat.preloadLocalModel}
+            onEnableBuiltIn={chat.enableBuiltIn}
+            onRefreshBuiltIn={chat.refreshBuiltIn}
             onClearIndex={clearIndex}
           />
         )}

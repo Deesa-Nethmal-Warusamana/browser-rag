@@ -16,9 +16,8 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
-  // transformers.js ships its own wasm assets and breaks if pre-bundled, so it
-  // is excluded. web-llm must NOT be excluded: its package entry is a raw ESM
-  // bundle with bare imports, which the dev server cannot serve unbundled.
+  // transformers.js ships its own wasm assets, so it must stay out of Vite's
+  // dependency pre-bundling.
   optimizeDeps: {
     exclude: ['@huggingface/transformers'],
   },

@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 
 export interface Settings {
-  provider: 'local' | 'api';
+  provider: 'builtin' | 'api';
   apiKey: string;
   baseUrl: string;
   model: string;
   rememberKey: boolean;
-  localModel: string;
   topK: number;
 }
 
@@ -14,35 +13,43 @@ const SETTINGS_KEY = 'browser-rag:settings:v1';
 const KEY_SLOT = 'browser-rag:api-key';
 
 export const DEFAULT_SETTINGS: Settings = {
-  provider: 'local',
+  provider: 'builtin',
   apiKey: '',
   baseUrl: 'https://api.openai.com/v1',
   model: 'gpt-4o-mini',
   rememberKey: false,
-  localModel: 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
   topK: 6,
 };
 
 function readSettings(): Settings {
-  let stored: Partial<Settings> = {};
+  let stored: Record<string, unknown> = {};
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) stored = JSON.parse(raw) as Partial<Settings>;
+    if (raw) stored = JSON.parse(raw) as Record<string, unknown>;
   } catch {
     /* corrupted settings — start fresh */
   }
 
-  let apiKey = '';
+  const settings: Settings = {
+    ...DEFAULT_SETTINGS,
+    // Older builds stored 'local' for the WebLLM provider; treat it as built-in.
+    provider: stored.provider === 'api' ? 'api' : 'builtin',
+    baseUrl: typeof stored.baseUrl === 'string' ? stored.baseUrl : DEFAULT_SETTINGS.baseUrl,
+    model: typeof stored.model === 'string' ? stored.model : DEFAULT_SETTINGS.model,
+    rememberKey: stored.rememberKey === true,
+    topK: typeof stored.topK === 'number' ? stored.topK : DEFAULT_SETTINGS.topK,
+  };
+
   try {
-    apiKey =
-      (stored.rememberKey ? localStorage.getItem(KEY_SLOT) : null) ??
+    settings.apiKey =
+      (settings.rememberKey ? localStorage.getItem(KEY_SLOT) : null) ??
       sessionStorage.getItem(KEY_SLOT) ??
       '';
   } catch {
     /* storage disabled */
   }
 
-  return { ...DEFAULT_SETTINGS, ...stored, apiKey };
+  return settings;
 }
 
 function persistSettings(settings: Settings) {

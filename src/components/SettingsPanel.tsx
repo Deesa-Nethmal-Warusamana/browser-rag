@@ -1,33 +1,69 @@
 import { useState } from 'react';
 import type { Settings } from '../hooks/useSettings';
-import type { LocalModelState } from '../hooks/useChat';
-import { API_PRESETS, LOCAL_MODELS } from '../llm/models';
+import type { BuiltInState } from '../hooks/useChat';
+import { API_PRESETS } from '../llm/models';
 
 interface Props {
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
-  local: LocalModelState;
-  hasWebGPU: boolean;
+  builtin: BuiltInState;
   hasDocs: boolean;
   backend: string;
   chunks: number;
-  onLoadLocal: () => void;
+  onEnableBuiltIn: () => void;
+  onRefreshBuiltIn: () => void;
   onClearIndex: () => void;
 }
+
+const BUILT_IN_COPY: Record<
+  BuiltInState['status'],
+  { label: string; tone: 'ok' | 'wait' | 'bad' | 'idle'; body: string }
+> = {
+  checking: {
+    label: 'Checking…',
+    tone: 'idle',
+    body: 'Looking for the built-in model in this browser.',
+  },
+  available: {
+    label: 'Ready',
+    tone: 'ok',
+    body: 'Gemini Nano runs inside Chrome. No download for this app to manage, no API key, no bundle.',
+  },
+  downloadable: {
+    label: 'Needs setup',
+    tone: 'wait',
+    body: 'Chrome can fetch Gemini Nano (roughly 2 GB, managed by Chrome). Enable it once and every site on this device can use it.',
+  },
+  downloading: {
+    label: 'Downloading…',
+    tone: 'wait',
+    body: 'Chrome is fetching the model. Keep this tab open; you can keep working once it reports ready.',
+  },
+  unavailable: {
+    label: 'Unavailable',
+    tone: 'bad',
+    body: 'Chrome has the API but the model cannot run here — it needs a supported GPU and about 22 GB of free disk. Use the API provider instead.',
+  },
+  unsupported: {
+    label: 'Not supported',
+    tone: 'bad',
+    body: 'This browser does not expose the built-in AI API. Use Chrome 138+ on desktop, or switch to the API provider.',
+  },
+};
 
 export function SettingsPanel({
   settings,
   update,
-  local,
-  hasWebGPU,
+  builtin,
   hasDocs,
   backend,
   chunks,
-  onLoadLocal,
+  onEnableBuiltIn,
+  onRefreshBuiltIn,
   onClearIndex,
 }: Props) {
-  const model = LOCAL_MODELS.find((option) => option.id === settings.localModel) ?? LOCAL_MODELS[0];
   const [confirmClear, setConfirmClear] = useState(false);
+  const copy = BUILT_IN_COPY[builtin.status];
 
   return (
     <section className="panel">
@@ -39,11 +75,11 @@ export function SettingsPanel({
         <button
           type="button"
           role="tab"
-          aria-selected={settings.provider === 'local'}
-          className={settings.provider === 'local' ? 'active' : ''}
-          onClick={() => update({ provider: 'local' })}
+          aria-selected={settings.provider === 'builtin'}
+          className={settings.provider === 'builtin' ? 'active' : ''}
+          onClick={() => update({ provider: 'builtin' })}
         >
-          On-device
+          Built-in
         </button>
         <button
           type="button"
@@ -56,51 +92,34 @@ export function SettingsPanel({
         </button>
       </div>
 
-      {settings.provider === 'local' ? (
-        <div className="stack">
-          <label className="field">
-            <span className="field-label">Local model</span>
-            <select
-              className="input"
-              value={settings.localModel}
-              onChange={(event) => update({ localModel: event.target.value })}
-            >
-              {LOCAL_MODELS.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label} · {option.size}
-                </option>
-              ))}
-            </select>
-            <span className="field-hint">{model.note}</span>
-          </label>
+      {settings.provider === 'builtin' ? (
+        <div className="builtin-card">
+          <div className="builtin-head">
+            <span className={`dot ${copy.tone}`} aria-hidden />
+            <strong>{copy.label}</strong>
+            <button type="button" className="link-btn" onClick={onRefreshBuiltIn}>
+              Recheck
+            </button>
+          </div>
 
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={onLoadLocal}
-            disabled={local.status === 'loading' || !hasWebGPU}
-          >
-            {local.status === 'ready'
-              ? 'Model loaded ✓'
-              : local.status === 'loading'
-                ? 'Downloading…'
-                : 'Download & load model'}
-          </button>
+          <p className="note">{copy.body}</p>
 
-          {!hasWebGPU && (
-            <p className="note warn">
-              WebGPU is unavailable in this browser. Use Chrome/Edge for the on-device model, or
-              switch to the API provider.
-            </p>
-          )}
-
-          {local.status === 'loading' && (
+          {builtin.status === 'downloading' && (
             <div className="progress" aria-hidden>
-              <div className="progress-bar" style={{ width: `${Math.round((local.pct ?? 0) * 100)}%` }} />
+              <div
+                className="progress-bar"
+                style={{ width: `${Math.max(3, Math.round((builtin.pct ?? 0) * 100))}%` }}
+              />
             </div>
           )}
 
-          {local.status !== 'idle' && <p className="note">{local.text}</p>}
+          {builtin.status === 'downloadable' && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onEnableBuiltIn}>
+              Enable built-in model
+            </button>
+          )}
+
+          {builtin.detail && <p className="note warn">{builtin.detail}</p>}
         </div>
       ) : (
         <div className="stack">
