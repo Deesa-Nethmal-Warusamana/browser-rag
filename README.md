@@ -4,6 +4,8 @@
 vector search and (optionally) generation all happen on your device. Drop in a PDF or a markdown
 file, ask a question, and get an answer with citations pointing at the exact passage it came from.
 
+**[Live demo →](https://deesa-nethmal-warusamana.github.io/browser-rag/)**
+
 ![Browser RAG screenshot](docs/screenshot.png)
 
 ![An answer with citation chips and retrieval metadata](docs/answer.png)
