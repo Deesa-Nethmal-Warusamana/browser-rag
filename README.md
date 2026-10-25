@@ -8,8 +8,6 @@ file, ask a question, and get an answer with citations pointing at the exact pas
 
 ![Browser RAG screenshot](docs/screenshot.png)
 
-![An answer with citation chips and retrieval metadata](docs/answer.png)
-
 - **No backend.** The whole app is static files. Hosting cost: $0.
 - **No data leaves the device.** Documents are parsed, chunked and embedded locally with
   Transformers.js (ONNX Runtime Web, WebGPU with a WASM fallback) and stored in IndexedDB.
