@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  describeBuiltInError,
   getBuiltInStatus,
   isMissingModelReply,
   isQuotaError,
@@ -188,5 +189,22 @@ describe('isMissingModelReply', () => {
   it('recognises the canned reply from shells without a model', () => {
     expect(isMissingModelReply('On-device model is not available in Chrome.')).toBe(true);
     expect(isMissingModelReply('Feature work pauses at 75 percent of the budget.')).toBe(false);
+  });
+});
+
+describe('describeBuiltInError', () => {
+  it('rewrites a context-window rejection into plain language', () => {
+    const error = new Error('The input is too large.');
+    error.name = 'QuotaExceededError';
+
+    const message = describeBuiltInError(error);
+    expect(message).toMatch(/context window is too small/i);
+    expect(message).toMatch(/Passages per question/i);
+    expect(message).not.toMatch(/the input is too large/i);
+  });
+
+  it('passes unrecognised errors through unchanged', () => {
+    expect(describeBuiltInError(new Error('boom'))).toBe('boom');
+    expect(describeBuiltInError('nope')).toBe('nope');
   });
 });

@@ -97,6 +97,14 @@ export function isMissingModelReply(text: string): boolean {
   return /on-device model is not available/i.test(text);
 }
 
+/** User-facing wording for errors coming out of the built-in model. */
+export function describeBuiltInError(error: unknown): string {
+  if (isQuotaError(error)) {
+    return 'The built-in model’s context window is too small for even one passage. Lower “Passages per question” in Setup, ask a shorter question, or switch to the API provider.';
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Converts a stream that may yield cumulative snapshots into deltas.
  */

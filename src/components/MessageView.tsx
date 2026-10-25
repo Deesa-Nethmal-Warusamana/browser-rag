@@ -121,7 +121,9 @@ export function MessageView({ item }: { item: ChatItem }) {
                   aria-expanded={openSources}
                 >
                   <span className={`caret ${openSources ? 'open' : ''}`}>▸</span>
-                  {openSources ? 'Hide sources' : `Show ${citations.length} sources`}
+                  {openSources
+                    ? 'Hide sources'
+                    : `Show ${citations.length} ${citations.length === 1 ? 'source' : 'sources'}`}
                 </button>
 
                 {openSources && (

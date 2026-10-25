@@ -5,6 +5,7 @@ import { createOutputGuard, stopMessage, type StopReason } from '../lib/repeatGu
 import type { SearchHit, SearchResult } from '../lib/types';
 import { streamCompletion } from '../llm/openai';
 import {
+  describeBuiltInError,
   getBuiltInStatus,
   isMissingModelReply,
   isQuotaError,
@@ -39,11 +40,12 @@ const uid = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
 
-function describeRetrieval(result: SearchResult): string {
+function describeRetrieval(result: SearchResult, hitCount = result.hits.length): string {
   const best = Math.round(result.topDenseScore * 100);
+  const passages = `${hitCount} passage${hitCount === 1 ? '' : 's'}`;
   const approach =
     result.approach === 'overview' ? ' · overview ranking (front matter boosted)' : '';
-  return `${result.hits.length} passages · ${result.vectorCount} chunks searched · ${result.tookMs} ms · best match ${best}%${approach}`;
+  return `${passages} · ${result.vectorCount} chunks searched · ${result.tookMs} ms · best match ${best}%${approach}`;
 }
 
 function builtInUnavailableMessage(status: BuiltInStatus): string {
@@ -213,9 +215,16 @@ export function useChat(client: RagClient, settings: Settings) {
               );
               break;
             } catch (error) {
-              if (!isQuotaError(error) || hits.length <= 2 || attempt >= 2) throw error;
-              hits = hits.slice(0, Math.max(2, Math.ceil(hits.length / 2)));
-              patch(assistantId, { content: '', citations: hits });
+              if (!isQuotaError(error)) throw error;
+              // Gemini Nano's window is small: drop the weakest passages and retry,
+              // then explain in plain language rather than showing the raw error.
+              if (hits.length <= 1 || attempt >= 3) throw new Error(describeBuiltInError(error));
+              hits = hits.slice(0, Math.max(1, Math.ceil(hits.length / 2)));
+              patch(assistantId, {
+                content: '',
+                citations: hits,
+                meta: describeRetrieval(result, hits.length),
+              });
             }
           }
 
